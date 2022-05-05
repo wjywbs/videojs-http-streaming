@@ -1,4 +1,5 @@
 import videojs from 'video.js';
+import window from 'global/window';
 import { createTransferableMessage } from './bin-utils';
 import { stringToArrayBuffer } from './util/string-to-array-buffer';
 import { transmux } from './segment-transmuxer';
@@ -559,6 +560,39 @@ const handleSegmentBytes = ({
 };
 
 const decrypt = function({id, key, encryptedBytes, decryptionWorker}, callback) {
+
+  let keyBytes;
+
+  if (key.bytes.slice) {
+    keyBytes = key.bytes.slice();
+  } else {
+    keyBytes = new Uint32Array(Array.prototype.slice.call(key.bytes));
+  }
+
+  if (window.crypto && window.crypto.subtle) {
+    const convertToLittleEndian = function(sourceBuffer) {
+      const buffer = new ArrayBuffer(sourceBuffer.byteLength);
+      const source = new DataView(sourceBuffer);
+      const dest = new DataView(buffer);
+
+      for (let i = 0; i < sourceBuffer.byteLength / 4; i++) {
+        dest.setUint32(i * 4, source.getUint32(i * 4), true);
+      }
+      return buffer;
+    };
+
+    keyBytes = convertToLittleEndian(keyBytes.buffer);
+    const iv = convertToLittleEndian(key.iv.buffer);
+
+    window.crypto.subtle.importKey('raw', keyBytes, 'AES-CBC', true, ['decrypt']).then((cryptoKey) => {
+      return window.crypto.subtle.decrypt({name: 'AES-CBC', iv}, cryptoKey, encryptedBytes.buffer);
+
+    }).then((decrypted) => {
+      callback(new Uint8Array(decrypted));
+    });
+    return;
+  }
+
   const decryptionHandler = (event) => {
     if (event.data.source === id) {
       decryptionWorker.removeEventListener('message', decryptionHandler);
@@ -573,14 +607,6 @@ const decrypt = function({id, key, encryptedBytes, decryptionWorker}, callback) 
   };
 
   decryptionWorker.addEventListener('message', decryptionHandler);
-
-  let keyBytes;
-
-  if (key.bytes.slice) {
-    keyBytes = key.bytes.slice();
-  } else {
-    keyBytes = new Uint32Array(Array.prototype.slice.call(key.bytes));
-  }
 
   // incrementally decrypt the bytes
   decryptionWorker.postMessage(createTransferableMessage({
